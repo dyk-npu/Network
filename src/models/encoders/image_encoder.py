@@ -68,14 +68,38 @@ class MultiViewViTEncoder(nn.Module):
 
     def _create_backbone(self, model_name: str):
         """创建ViT backbone"""
-        backbone = create_model(
-            model_name,
-            pretrained=True,
-            num_classes=0,
-            global_pool="",
-            pretrained_cfg_overlay=dict(file=r'D:\PythonProjects\Network\models\pretrained\vit_base_patch16_224\pytorch_model.bin')
-        )
-
+        try:
+            # 首先尝试加载本地预训练模型
+            local_model_path = r'D:\PythonProjects\Network\models\pretrained\vit_base_patch16_224\pytorch_model.bin'
+            if os.path.exists(local_model_path):
+                backbone = create_model(
+                    model_name,
+                    pretrained=False,
+                    num_classes=0,
+                    global_pool=""
+                )
+                # 加载本地权重
+                state_dict = torch.load(local_model_path, map_location='cpu')
+                backbone.load_state_dict(state_dict, strict=False)
+                print(f"Loaded local pretrained model from {local_model_path}")
+            else:
+                # 回退到在线下载
+                print(f"Local model not found at {local_model_path}, using online pretrained model")
+                backbone = create_model(
+                    model_name,
+                    pretrained=True,
+                    num_classes=0,
+                    global_pool=""
+                )
+        except Exception as e:
+            print(f"Warning: Error loading pretrained model: {e}")
+            print("Creating model without pretrained weights")
+            backbone = create_model(
+                model_name,
+                pretrained=False,
+                num_classes=0,
+                global_pool=""
+            )
 
         return backbone
 
@@ -84,25 +108,52 @@ class MultiViewViTEncoder(nn.Module):
         """动态获取backbone的输出维度"""
         self.backbone.eval()
         with torch.no_grad():
-            # 创建一个测试输入
-            test_input = torch.randn(1, 3, 224, 224)
-            test_output = self.backbone(test_input)
+            try:
+                # 创建一个测试输入
+                test_input = torch.randn(1, 3, 224, 224)
+                test_output = self.backbone(test_input)
 
-            # 模拟forward方法中的处理过程
-            processed_output = test_output
-            if len(processed_output.shape) > 2:
-                # 如果输出是4D或3D张量，进行全局平均池化
-                while len(processed_output.shape) > 2:
-                    processed_output = processed_output.mean(dim=-1)
+                # 处理不同的输出格式
+                processed_output = self._process_backbone_output(test_output)
+                output_dim = processed_output.size(1)
 
-            # 确保特征是2D张量
-            if len(processed_output.shape) != 2:
-                processed_output = processed_output.view(processed_output.size(0), -1)
+                print(f"Backbone output shape: {test_output.shape} -> processed: {processed_output.shape}, feature dim: {output_dim}")
+                return output_dim
+            except Exception as e:
+                print(f"Error getting backbone output dim: {e}")
+                # 根据常见的ViT模型返回默认值
+                if "vit_base" in self.backbone.__class__.__name__.lower():
+                    return 768
+                elif "vit_large" in self.backbone.__class__.__name__.lower():
+                    return 1024
+                else:
+                    return 768  # 默认值
 
-            output_dim = processed_output.size(1)
+    def _process_backbone_output(self, output: torch.Tensor) -> torch.Tensor:
+        """统一处理backbone输出，确保返回2D张量"""
+        processed_output = output
 
-            print(f"Backbone output shape: {test_output.shape} -> processed: {processed_output.shape}, feature dim: {output_dim}")
-            return output_dim
+        # 处理不同维度的输出
+        if len(processed_output.shape) == 4:
+            # [batch, channels, height, width] -> [batch, features]
+            processed_output = F.adaptive_avg_pool2d(processed_output, (1, 1))
+            processed_output = processed_output.view(processed_output.size(0), -1)
+        elif len(processed_output.shape) == 3:
+            # [batch, sequence_length, features] -> [batch, features]
+            # 对于ViT，通常取第一个token (CLS token)或者平均池化
+            if processed_output.size(1) > 1:
+                # 如果有多个token，取CLS token (第一个)
+                processed_output = processed_output[:, 0]
+            else:
+                processed_output = processed_output.squeeze(1)
+        elif len(processed_output.shape) == 2:
+            # 已经是正确格式
+            pass
+        else:
+            # 其他情况，展平为2D
+            processed_output = processed_output.view(processed_output.size(0), -1)
+
+        return processed_output
 
     def forward(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
@@ -122,15 +173,8 @@ class MultiViewViTEncoder(nn.Module):
         # 通过backbone提取特征
         features = self.backbone(images_flat)  # 可能是 [batch_size * num_views, ...] 的各种形状
 
-        # 处理不同的特征输出格式
-        if len(features.shape) > 2:
-            # 如果输出是4D或3D张量，进行全局平均池化
-            while len(features.shape) > 2:
-                features = features.mean(dim=-1)  # 逐步降维
-
-        # 确保特征是2D张量 [batch_size * num_views, feature_dim]
-        if len(features.shape) != 2:
-            features = features.view(features.size(0), -1)
+        # 使用统一的输出处理函数
+        features = self._process_backbone_output(features)
 
         # 投影到目标维度
         features = self.feature_projection(features)  # [batch_size * num_views, feature_dim]
