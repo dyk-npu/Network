@@ -116,8 +116,8 @@ def load_checkpoint(checkpoint_path: str, model, trainer, logger):
     # 加载优化器状态
     trainer.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
-    # 加载调度器状态（如果存在）
-    if 'scheduler_state_dict' in checkpoint and hasattr(trainer, 'scheduler'):
+    # 加载调度器状态
+    if 'scheduler_state_dict' in checkpoint:
         trainer.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
 
     # 返回起始epoch和最佳指标
@@ -177,7 +177,12 @@ def train_model(config: BaseConfig, model_config: ModelConfig, train_loader, val
 
         # 记录训练指标
         for key, value in train_metrics.items():
-            writer.add_scalar(f"Train/{key}", value, epoch)
+            if isinstance(value, (int, float)):
+                writer.add_scalar(f"Train/{key}", value, epoch)
+            elif isinstance(value, (list, tuple)):
+                # 对于列表类型的指标，逐个记录
+                for i, v in enumerate(value):
+                    writer.add_scalar(f"Train/{key}_class_{i}", v, epoch)
 
         # 记录模型参数直方图和梯度（可配置）
         if config.log_histograms and (epoch + 1) % config.histogram_freq == 0:
@@ -201,7 +206,12 @@ def train_model(config: BaseConfig, model_config: ModelConfig, train_loader, val
 
             # 记录验证指标
             for key, value in val_metrics.items():
-                writer.add_scalar(f"Val/{key}", value, epoch)
+                if isinstance(value, (int, float)):
+                    writer.add_scalar(f"Val/{key}", value, epoch)
+                elif isinstance(value, (list, tuple)):
+                    # 对于列表类型的指标（如class_accuracies），逐个记录
+                    for i, v in enumerate(value):
+                        writer.add_scalar(f"Val/{key}_class_{i}", v, epoch)
 
             # 记录训练和验证损失的比较
             if 'loss' in train_metrics and 'loss' in val_metrics:
@@ -240,9 +250,8 @@ def train_model(config: BaseConfig, model_config: ModelConfig, train_loader, val
                     'val_metrics': val_metrics
                 }
 
-                # 保存调度器状态（如果存在）
-                if hasattr(trainer, 'scheduler') and trainer.scheduler is not None:
-                    checkpoint_dict['scheduler_state_dict'] = trainer.scheduler.state_dict()
+                # 保存调度器状态
+                checkpoint_dict['scheduler_state_dict'] = trainer.scheduler.state_dict()
 
                 torch.save(checkpoint_dict, model_save_path)
 
@@ -271,13 +280,12 @@ def train_model(config: BaseConfig, model_config: ModelConfig, train_loader, val
                 'config': model_config
             }
 
-            # 添加验证指标（如果存在）
-            if 'val_metrics' in locals():
+            # 添加验证指标（仅在验证周期保存）
+            if (epoch + 1) % config.eval_interval == 0 and 'val_metrics' in locals():
                 checkpoint_dict['val_metrics'] = val_metrics
 
-            # 保存调度器状态（如果存在）
-            if hasattr(trainer, 'scheduler') and trainer.scheduler is not None:
-                checkpoint_dict['scheduler_state_dict'] = trainer.scheduler.state_dict()
+            # 保存调度器状态
+            checkpoint_dict['scheduler_state_dict'] = trainer.scheduler.state_dict()
 
             torch.save(checkpoint_dict, checkpoint_path)
 

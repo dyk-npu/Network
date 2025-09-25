@@ -28,7 +28,51 @@ def load_model(model_path: str):
     config = checkpoint['config']
 
     model = MultiModalClassificationPipeline(config)
-    model.load_state_dict(checkpoint['model_state_dict'])
+
+    # 处理适应性层的状态字典加载问题
+    state_dict = checkpoint['model_state_dict']
+    model_state_dict = model.state_dict()
+
+    # 找出checkpoint中存在但model中不存在的adaptive层
+    adaptive_keys = [key for key in state_dict.keys() if 'adaptive_' in key]
+
+    if adaptive_keys:
+        print(f"发现 {len(adaptive_keys)} 个适应性层，正在重新创建...")
+
+        # 为每个adaptive层预先创建对应的层
+        for key in adaptive_keys:
+            if key.startswith('brep_encoder.adaptive_'):
+                # 解析层名称获取输入输出维度
+                layer_name = key.replace('brep_encoder.adaptive_', '').replace('.weight', '').replace('.bias', '')
+                if layer_name and '_' in layer_name:
+                    dims = layer_name.split('_')
+                    if len(dims) >= 2:
+                        try:
+                            input_dim = int(dims[0])
+                            output_dim = int(dims[1])
+
+                            # 创建适应性投影层
+                            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                            adaptive_layer = model.brep_encoder._get_adaptive_projection(
+                                input_dim, output_dim, device='cpu'
+                            )
+                            print(f"  创建适应性层: {input_dim} -> {output_dim}")
+                        except ValueError:
+                            print(f"  警告: 无法解析适应性层维度: {layer_name}")
+
+    # 现在尝试加载状态字典
+    try:
+        model.load_state_dict(state_dict, strict=True)
+        print("状态字典加载成功")
+    except RuntimeError as e:
+        print(f"严格模式加载失败: {e}")
+        # 尝试非严格模式加载
+        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+        if missing_keys:
+            print(f"缺失的键: {missing_keys}")
+        if unexpected_keys:
+            print(f"意外的键: {unexpected_keys}")
+
     model.eval()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

@@ -32,9 +32,15 @@ class DataConfig(BaseConfig):
     brep_resolution: int = 64
     brep_normalize: bool = True
 
+    # Brep编码器采样配置
+    brep_curv_u_samples: int = 10  # 曲线U方向采样数
+    brep_surf_u_samples: int = 10  # 表面U方向采样数
+    brep_surf_v_samples: int = 10  # 表面V方向采样数
+
     # 数据加载配置
     pin_memory: bool = True
     prefetch_factor: int = 2
+    brep_num_processes: int = 8  # B-rep编码器多进程数量
 
     # 支持的文件格式
     supported_image_formats: List[str] = None

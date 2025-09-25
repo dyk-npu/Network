@@ -1,6 +1,6 @@
 import os
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List
 
 
 @dataclass
@@ -12,6 +12,7 @@ class BaseConfig:
     data_root: str = os.path.join(project_root, "data")
     model_save_dir: str = os.path.join(project_root, "experiments", "checkpoints")
     log_dir: str = os.path.join(project_root, "experiments", "logs")
+    tensorboard_log_dir: str = os.path.join(project_root, "experiments", "tensorboard")
 
     # 设备配置
     device: str = "cuda"
@@ -31,7 +32,16 @@ class BaseConfig:
     save_interval: int = 10
     eval_interval: int = 5
 
+    # 恢复训练配置
+    resume_from_checkpoint: str = ""
+
+    # TensorBoard配置
+    log_histograms: bool = True
+    log_gradients: bool = False
+    histogram_freq: int = 10
+
     def __post_init__(self):
         """创建必要的目录"""
         os.makedirs(self.model_save_dir, exist_ok=True)
         os.makedirs(self.log_dir, exist_ok=True)
+        os.makedirs(self.tensorboard_log_dir, exist_ok=True)

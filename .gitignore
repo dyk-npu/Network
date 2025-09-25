@@ -1,1 +1,6 @@
 /models/pretrained/vit_base_patch16_224/
+/CLAUDE.md
+/.claude/
+/data/images/
+/data/descriptions/
+/data/brep_models/

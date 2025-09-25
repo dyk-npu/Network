@@ -6,6 +6,7 @@ from timm import create_model
 from typing import List, Tuple, Optional, Dict
 import numpy as np
 import os
+from config.model_config import VIT_MODEL_LOCAL_PATH
 import warnings
 import timm
 
@@ -70,7 +71,7 @@ class MultiViewViTEncoder(nn.Module):
         """创建ViT backbone"""
         try:
             # 首先尝试加载本地预训练模型
-            local_model_path = r'D:\PythonProjects\Network\models\pretrained\vit_base_patch16_224\pytorch_model.bin'
+            local_model_path = VIT_MODEL_LOCAL_PATH
             if os.path.exists(local_model_path):
                 backbone = create_model(
                     model_name,
