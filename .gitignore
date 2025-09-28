@@ -4,3 +4,13 @@
 /data/images/
 /data/descriptions/
 /data/brep_models/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
