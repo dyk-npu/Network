@@ -119,26 +119,112 @@ def load_brep_graph(brep_path: str):
         return None
 
 
-def predict_single_model(model, device, image_paths: list, brep_path: str):
-    """对单个模型进行预测"""
-    # 预处理输入
-    images = preprocess_images(image_paths).to(device)
-
-    brep_graph = load_brep_graph(brep_path)
-    if brep_graph is None:
-        print("无法加载B-rep图，跳过预测")
+def predict_single_model(model, device, image_paths: list = None, brep_path: str = None):
+    """对单个模型进行预测 - 支持单模态或双模态输入"""
+    if image_paths is None and brep_path is None:
+        print("错误: 至少需要提供图像或Brep中的一种输入")
         return None
 
-    graphs = dgl.batch([brep_graph]).to(device)
+    # 预处理图像输入
+    images = None
+    if image_paths:
+        try:
+            images = preprocess_images(image_paths).to(device)
+            print(f"✓ 成功加载 {len([p for p in image_paths if p and os.path.exists(p)])} 个图像")
+        except Exception as e:
+            print(f"图像预处理失败: {e}")
+            if brep_path is None:  # 如果只有图像输入且失败了
+                return None
+
+    # 预处理Brep输入
+    graphs = None
+    if brep_path:
+        brep_graph = load_brep_graph(brep_path)
+        if brep_graph is not None:
+            graphs = dgl.batch([brep_graph]).to(device)
+            print(f"✓ 成功加载Brep图")
+        else:
+            if images is None:  # 如果只有Brep输入且失败了
+                return None
+
+    # 检查是否有有效输入
+    if images is None and graphs is None:
+        print("错误: 没有有效的输入数据")
+        return None
 
     # 预测
     with torch.no_grad():
-        results = model.predict(images, graphs)
+        if images is not None and graphs is not None:
+            # 双模态预测
+            results = model.predict(images, graphs)
+            modality = "dual"
+        elif images is not None:
+            # 仅图像预测 - 使用辅助分类器
+            results = predict_image_only(model, images)
+            modality = "image"
+        else:
+            # 仅Brep预测 - 使用辅助分类器
+            results = predict_brep_only(model, graphs)
+            modality = "brep"
+
+    result = {
+        'prediction': results['predictions'].cpu().item() if torch.is_tensor(results['predictions']) else results['predictions'],
+        'confidence': results['confidence'].cpu().item() if torch.is_tensor(results['confidence']) else results['confidence'],
+        'probabilities': results['probabilities'].cpu().numpy().flatten() if torch.is_tensor(results['probabilities']) else results['probabilities'],
+        'modality': modality
+    }
+
+    return result
+
+
+def predict_image_only(model, images):
+    """仅使用图像进行预测"""
+    # 提取图像特征
+    image_features = model.image_encoder(images)
+
+    # 创建虚拟Brep特征（全零）
+    batch_size = images.size(0)
+    dummy_brep = torch.zeros(batch_size, model.config.brep_dim).to(images.device)
+
+    # 通过融合模块
+    fusion_output = model.fuser(image_features, dummy_brep)
+
+    # 使用图像辅助分类器
+    image_logits = model.classifier.image_classifier(fusion_output['image_enhanced'])
+    probabilities = torch.softmax(image_logits, dim=-1)
+    predictions = torch.argmax(image_logits, dim=-1)
+    confidence = torch.max(probabilities, dim=-1)[0]
 
     return {
-        'prediction': results['predictions'].cpu().item(),
-        'confidence': results['confidence'].cpu().item(),
-        'probabilities': results['probabilities'].cpu().numpy().flatten()
+        'predictions': predictions,
+        'confidence': confidence,
+        'probabilities': probabilities
+    }
+
+
+def predict_brep_only(model, graphs):
+    """仅使用Brep进行预测"""
+    # 提取Brep特征
+    brep_output = model.brep_encoder(graphs)
+    brep_features = brep_output['features']
+
+    # 创建虚拟图像特征（全零）
+    batch_size = brep_features.size(0)
+    dummy_image = torch.zeros(batch_size, model.config.image_dim).to(brep_features.device)
+
+    # 通过融合模块
+    fusion_output = model.fuser(dummy_image, brep_features)
+
+    # 使用Brep辅助分类器
+    brep_logits = model.classifier.brep_classifier(fusion_output['brep_enhanced'])
+    probabilities = torch.softmax(brep_logits, dim=-1)
+    predictions = torch.argmax(brep_logits, dim=-1)
+    confidence = torch.max(probabilities, dim=-1)[0]
+
+    return {
+        'predictions': predictions,
+        'confidence': confidence,
+        'probabilities': probabilities
     }
 
 
@@ -177,6 +263,7 @@ def predict_from_annotation(model, device, annotation_file: str, item_id: str):
 
         print(f"\n预测结果:")
         print(f"  模型ID: {item_id}")
+        print(f"  使用模态: {result['modality']}")
         print(f"  真实类别: {true_category}")
         print(f"  预测类别: {predicted_category}")
         print(f"  预测置信度: {result['confidence']:.4f}")
@@ -292,20 +379,31 @@ def main():
         # 单个模型预测（从标注文件）
         predict_from_annotation(model, device, args.annotation_file, args.item_id)
 
-    elif args.image_paths and args.brep_path:
-        # 直接指定文件路径预测
+    elif args.image_paths or args.brep_path:
+        # 直接指定文件路径预测（支持单模态或双模态）
         result = predict_single_model(model, device, args.image_paths, args.brep_path)
         if result:
             predicted_category = MultiModalCADDataset.label_to_category(result['prediction'])
             print(f"\n预测结果:")
+            print(f"  使用模态: {result['modality']}")
             print(f"  预测类别: {predicted_category}")
             print(f"  置信度: {result['confidence']:.4f}")
 
     else:
         print("请指定预测方式:")
-        print("  --item_id MODEL_ID        # 从标注文件预测单个模型")
-        print("  --batch_test N            # 批量测试N个样本")
-        print("  --image_paths + --brep_path # 直接指定文件路径")
+        print("  --item_id MODEL_ID              # 从标注文件预测单个模型")
+        print("  --batch_test N                  # 批量测试N个样本")
+        print("  --image_paths [front side top]  # 仅图像预测（1-3个图像）")
+        print("  --brep_path PATH                # 仅Brep预测")
+        print("  --image_paths ... --brep_path   # 双模态预测")
+        print("")
+        print("示例:")
+        print("  # 仅图像预测")
+        print("  python inference.py --model_path model.pth --image_paths front.jpg side.jpg")
+        print("  # 仅Brep预测")
+        print("  python inference.py --model_path model.pth --brep_path model.dgl")
+        print("  # 双模态预测")
+        print("  python inference.py --model_path model.pth --image_paths front.jpg --brep_path model.dgl")
 
 
 if __name__ == "__main__":

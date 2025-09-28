@@ -105,20 +105,70 @@ def create_dataloaders(annotation_file: str, config: BaseConfig, train_ratio: fl
 
 
 def load_checkpoint(checkpoint_path: str, model, trainer, logger):
-    """加载检查点"""
+    """加载检查点，支持自适应层的动态创建"""
     logger.info(f"从检查点恢复训练: {checkpoint_path}")
 
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    state_dict = checkpoint['model_state_dict']
 
-    # 加载模型状态
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # 处理自适应层的状态字典加载问题
+    model_state_dict = model.state_dict()
+
+    # 找出checkpoint中存在但model中不存在的adaptive层
+    adaptive_keys = [key for key in state_dict.keys() if 'adaptive_' in key]
+
+    if adaptive_keys:
+        logger.info(f"发现 {len(adaptive_keys)} 个自适应层，正在重新创建...")
+
+        # 为每个adaptive层预先创建对应的层
+        for key in adaptive_keys:
+            if key.startswith('brep_encoder.adaptive_'):
+                # 解析层名称获取输入输出维度
+                layer_name = key.replace('brep_encoder.adaptive_', '').replace('.weight', '').replace('.bias', '')
+                if layer_name and '_' in layer_name:
+                    dims = layer_name.split('_')
+                    if len(dims) >= 2:
+                        try:
+                            input_dim = int(dims[0])
+                            output_dim = int(dims[1])
+
+                            # 创建自适应投影层
+                            device = next(model.parameters()).device
+                            adaptive_layer = model.brep_encoder._get_adaptive_projection(
+                                input_dim, output_dim, device
+                            )
+                            logger.info(f"  创建自适应层: {input_dim} -> {output_dim}")
+                        except ValueError:
+                            logger.warning(f"  警告: 无法解析自适应层维度: {layer_name}")
+
+    # 尝试加载模型状态
+    try:
+        model.load_state_dict(state_dict, strict=True)
+        logger.info("模型状态字典加载成功（严格模式）")
+    except RuntimeError as e:
+        logger.warning(f"严格模式加载失败: {e}")
+        # 尝试非严格模式加载
+        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+        if missing_keys:
+            logger.warning(f"缺失的键: {missing_keys[:5]}{'...' if len(missing_keys) > 5 else ''}")
+        if unexpected_keys:
+            logger.warning(f"意外的键: {unexpected_keys[:5]}{'...' if len(unexpected_keys) > 5 else ''}")
+        logger.info("模型状态字典加载成功（非严格模式）")
 
     # 加载优化器状态
-    trainer.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    try:
+        trainer.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        logger.info("优化器状态加载成功")
+    except Exception as e:
+        logger.warning(f"优化器状态加载失败: {e}，将使用默认状态")
 
     # 加载调度器状态
     if 'scheduler_state_dict' in checkpoint:
-        trainer.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        try:
+            trainer.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            logger.info("学习率调度器状态加载成功")
+        except Exception as e:
+            logger.warning(f"学习率调度器状态加载失败: {e}，将使用默认状态")
 
     # 返回起始epoch和最佳指标
     start_epoch = checkpoint.get('epoch', 0) + 1
@@ -433,7 +483,6 @@ def main():
         config.tensorboard_log_dir = args.tensorboard_log_dir
 
     model_config = ModelConfig()
-    model_config.num_classes = 43  # CADNET 43个类别
 
     # 设置日志
     logger = setup_logging(config.log_dir, args.experiment_name)
